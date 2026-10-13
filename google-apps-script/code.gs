@@ -1,35 +1,55 @@
-const SPREADSHEET_ID = '1jMa12xeTFbfdR5s3NAnYyQT8izPZ-8GAx82X_5i04EE';
+const SPREADSHEET_ID = '1g8kllbbrl7LYF9vzs41TLCSPBVEeGYGBXohBkM_S8KE';
+
+const SHEETS = {
+  rsvp: {
+    name: 'RSVP',
+    headers: ['Timestamp', 'Full Name', 'Guests', 'Dietary Notes'],
+    fields: ['fullName', 'guests', 'dietaryNotes'],
+    widths: [170, 240, 90, 360],
+  },
+  wishes: {
+    name: 'Wishes',
+    headers: ['Timestamp', 'Name', 'Message'],
+    fields: ['name', 'message'],
+    widths: [170, 240, 520],
+  },
+};
+
+const MAX_FIELD_LENGTH = 2000;
+
+// Run this once from the Apps Script editor to authorise the script
+// and create both sheets with their headers straight away.
+function setup() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  Object.keys(SHEETS).forEach(function (key) {
+    getOrCreateSheet_(ss, SHEETS[key]);
+  });
+}
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
+
   try {
     const payload = parsePayload_(e);
-    const sheetKey = String(payload.sheet || '').toUpperCase();
+    const config = SHEETS[String(payload.type || '').toLowerCase()];
 
-    if (sheetKey !== 'RSVP' && sheetKey !== 'WISH') {
-      return jsonResponse_({ ok: false, error: 'Invalid sheet. Use RSVP or WISH.' });
+    if (!config) {
+      return jsonResponse_({ ok: false, error: 'Invalid type. Use "rsvp" or "wishes".' });
     }
+
+    const values = config.fields.map(function (field) {
+      return clean_(payload[field]);
+    });
+
+    if (!values[0]) {
+      return jsonResponse_({ ok: false, error: 'Name is required.' });
+    }
+
+    lock.waitLock(20000);
 
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    const sheet = getOrCreateSheet_(ss, sheetKey);
-
-    if (sheetKey === 'RSVP') {
-      ensureHeaders_(sheet, ['Timestamp', 'Name', 'Phone', 'Guests', 'Attendance', 'DietaryRestrictions']);
-      sheet.appendRow([
-        new Date(),
-        payload.name || '',
-        payload.phone || payload.email || '',
-        payload.guests || '',
-        payload.attendance || '',
-        payload.dietaryRestrictions || '',
-      ]);
-    } else {
-      ensureHeaders_(sheet, ['Timestamp', 'Name', 'Message']);
-      sheet.appendRow([
-        new Date(),
-        payload.name || '',
-        payload.message || '',
-      ]);
-    }
+    const sheet = getOrCreateSheet_(ss, config);
+    sheet.appendRow([new Date()].concat(values));
 
     return jsonResponse_({ ok: true });
   } catch (error) {
@@ -37,6 +57,10 @@ function doPost(e) {
       ok: false,
       error: String(error && error.message ? error.message : error),
     });
+  } finally {
+    if (lock.hasLock()) {
+      lock.releaseLock();
+    }
   }
 }
 
@@ -48,60 +72,47 @@ function doGet() {
 }
 
 function parsePayload_(e) {
-  const params = e && e.parameter ? e.parameter : {};
-
-  if (Object.keys(params).length > 0) {
-    return params;
-  }
-
   const contents = e && e.postData && e.postData.contents ? e.postData.contents : '';
-  if (!contents) {
-    return {};
+
+  if (contents) {
+    try {
+      return JSON.parse(contents);
+    } catch (_error) {
+      // Not JSON; fall back to form parameters below.
+    }
   }
 
-  if (contents.indexOf('=') !== -1 && contents.indexOf('{') !== 0) {
-    return parseQueryString_(contents);
-  }
-
-  try {
-    return JSON.parse(contents);
-  } catch (_error) {
-    return {};
-  }
+  return e && e.parameter ? e.parameter : {};
 }
 
-function parseQueryString_(query) {
-  const out = {};
-  const pairs = String(query).split('&');
-
-  for (let i = 0; i < pairs.length; i++) {
-    const part = pairs[i];
-    if (!part) continue;
-
-    const idx = part.indexOf('=');
-    const rawKey = idx >= 0 ? part.slice(0, idx) : part;
-    const rawValue = idx >= 0 ? part.slice(idx + 1) : '';
-    const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
-    const value = decodeURIComponent(rawValue.replace(/\+/g, ' '));
-
-    out[key] = value;
-  }
-
-  return out;
-}
-
-function getOrCreateSheet_(ss, name) {
-  let sheet = ss.getSheetByName(name);
+function getOrCreateSheet_(ss, config) {
+  let sheet = ss.getSheetByName(config.name);
   if (!sheet) {
-    sheet = ss.insertSheet(name);
+    sheet = ss.insertSheet(config.name);
   }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, config.headers.length)
+      .setValues([config.headers])
+      .setFontWeight('bold')
+      .setFontColor('#ffffff')
+      .setBackground('#6b5544')
+      .setHorizontalAlignment('center');
+    sheet.setFrozenRows(1);
+    sheet.getRange(2, 1, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    sheet.getRange(1, 1, sheet.getMaxRows(), config.headers.length).setWrap(true).setVerticalAlignment('top');
+    config.widths.forEach(function (width, index) {
+      sheet.setColumnWidth(index + 1, width);
+    });
+  }
+
   return sheet;
 }
 
-function ensureHeaders_(sheet, headers) {
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(headers);
-  }
+// Trims the value and stops guest input from being run as a spreadsheet formula.
+function clean_(value) {
+  const text = String(value == null ? '' : value).trim().slice(0, MAX_FIELD_LENGTH);
+  return /^[=+\-@]/.test(text) ? "'" + text : text;
 }
 
 function jsonResponse_(data) {
